@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Find the real claude binary — picks the most recently modified version
+# so this keeps working after claude auto-updates
+VERSIONS_DIR="$HOME/.local/share/claude/versions"
+REAL_CLAUDE="$VERSIONS_DIR/$(ls -t "$VERSIONS_DIR" | head -1)"
+
+if [[ ! -x "$REAL_CLAUDE" ]]; then
+    echo "Error: could not find a runnable claude binary in $VERSIONS_DIR" >&2
+    exit 1
+fi
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+OUTPUT_FILE="${PWD}/${TIMESTAMP}-claude-session.ansi"
+
+script -q "$OUTPUT_FILE" "$REAL_CLAUDE" "$@"

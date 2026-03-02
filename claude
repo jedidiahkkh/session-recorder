@@ -12,6 +12,8 @@ if [[ ! -x "$REAL_CLAUDE" ]]; then
 fi
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-OUTPUT_FILE="${PWD}/${TIMESTAMP}-claude-session.ansi"
+SESSION_DIR="${PWD}/.claude-sessions"
+mkdir -p "$SESSION_DIR"
+OUTPUT_FILE="${SESSION_DIR}/${TIMESTAMP}-claude-session.ansi"
 
 script -q "$OUTPUT_FILE" "$REAL_CLAUDE" "$@"

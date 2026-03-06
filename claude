@@ -11,9 +11,5 @@ if [[ ! -x "$REAL_CLAUDE" ]]; then
     exit 1
 fi
 
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-SESSION_DIR="${PWD}/.claude-sessions"
-mkdir -p "$SESSION_DIR"
-OUTPUT_FILE="${SESSION_DIR}/${TIMESTAMP}-claude-session.ansi"
-
-script -q "$OUTPUT_FILE" "$REAL_CLAUDE" "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/record-session" "$REAL_CLAUDE" "$@"

@@ -11,5 +11,5 @@ if [[ ! -x "$REAL_CLAUDE" ]]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 exec "$SCRIPT_DIR/record-session" "$REAL_CLAUDE" "$@"

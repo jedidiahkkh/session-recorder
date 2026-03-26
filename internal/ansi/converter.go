@@ -169,12 +169,35 @@ func preprocessClears(data []byte) []byte {
 	return out
 }
 
-// estimateCols strips ANSI escape sequences and returns the length of the
-// longest printable line, falling back to 80 if nothing is found.
+// estimateCols tracks cursor column position through both printable characters
+// and cursor-movement CSI sequences, returning the maximum column reached.
+// Falls back to 80 if nothing wider is found.
 func estimateCols(data []byte) int {
 	max := 80
 	col := 0
 	i := 0
+
+	// csiNum parses an ASCII decimal string, returning def if empty/invalid.
+	csiNum := func(s []byte, def int) int {
+		if len(s) == 0 {
+			return def
+		}
+		v := 0
+		for _, c := range s {
+			if c < '0' || c > '9' {
+				return def
+			}
+			v = v*10 + int(c-'0')
+		}
+		return v
+	}
+
+	updateMax := func() {
+		if col > max {
+			max = col
+		}
+	}
+
 	for i < len(data) {
 		b := data[i]
 		switch {
@@ -184,12 +207,54 @@ func estimateCols(data []byte) int {
 				break
 			}
 			switch data[i] {
-			case '[': // CSI — skip until final byte 0x40–0x7e
+			case '[': // CSI — collect param bytes then dispatch on final byte
 				i++
+				paramStart := i
 				for i < len(data) && (data[i] < 0x40 || data[i] > 0x7e) {
 					i++
 				}
+				if i >= len(data) {
+					break
+				}
+				final := data[i]
+				param := data[paramStart:i]
 				i++ // consume final byte
+
+				switch final {
+				case 'C': // CUF — cursor forward
+					col += csiNum(param, 1)
+					updateMax()
+				case 'D': // CUB — cursor backward
+					col -= csiNum(param, 1)
+					if col < 0 {
+						col = 0
+					}
+				case 'G': // CHA — cursor absolute column (1-based)
+					col = csiNum(param, 1) - 1
+					if col < 0 {
+						col = 0
+					}
+					updateMax()
+				case 'H', 'f': // CUP / HVP — cursor position row;col (1-based)
+					semi := -1
+					for k, c := range param {
+						if c == ';' {
+							semi = k
+							break
+						}
+					}
+					if semi >= 0 {
+						col = csiNum(param[semi+1:], 1) - 1
+					} else {
+						col = 0
+					}
+					if col < 0 {
+						col = 0
+					}
+					updateMax()
+				}
+				// all other CSI sequences: no column effect
+
 			case ']': // OSC — skip until BEL or ST (ESC \)
 				i++
 				for i < len(data) {
@@ -207,9 +272,7 @@ func estimateCols(data []byte) int {
 				i++
 			}
 		case b == '\n':
-			if col > max {
-				max = col
-			}
+			updateMax()
 			col = 0
 			i++
 		case b == '\r':
@@ -221,16 +284,16 @@ func estimateCols(data []byte) int {
 			for i < len(data) && data[i]&0xC0 == 0x80 {
 				i++
 			}
+			updateMax()
 		case b >= 0x20: // printable ASCII
 			col++
+			updateMax()
 			i++
 		default: // other control bytes
 			i++
 		}
 	}
-	if col > max {
-		max = col
-	}
+	updateMax()
 	return max
 }
 

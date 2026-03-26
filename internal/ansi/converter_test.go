@@ -95,6 +95,75 @@ func TestEstimateCols(t *testing.T) {
 			input: "\x1b[1m" + strings.Repeat("x", 100) + "\x1b[0m",
 			want:  100,
 		},
+		// Cursor-movement sequences
+		{
+			name:  "CUF pushes col past 80",
+			input: strings.Repeat("x", 10) + "\x1b[75C|", // 10 + 75 + 1 = 86
+			want:  86,
+		},
+		{
+			name:  "CUF with default (no param) advances by 1",
+			input: strings.Repeat("x", 80) + "\x1b[C|", // 80 + 1 + 1 = 82
+			want:  82,
+		},
+		{
+			name:  "CUB reduces col, does not go below 0",
+			input: strings.Repeat("x", 10) + "\x1b[5D" + strings.Repeat("x", 76), // net 81
+			want:  81,
+		},
+		{
+			name:  "CHA sets absolute column (1-based)",
+			input: "\x1b[100G|", // jump to col 99 (0-based) then print 1 char = 100
+			want:  100,
+		},
+		{
+			name:  "CHA with col 1 resets to 0",
+			input: strings.Repeat("x", 90) + "\x1b[1G" + "hi", // 90 wide, then reset, 2 chars — max stays 90
+			want:  90,
+		},
+		{
+			name:  "CUP row;col sets column (1-based)",
+			input: "\x1b[1;105Hx", // col = 105-1 = 104, then 1 char = 105
+			want:  105,
+		},
+		{
+			name:  "CUP row only resets col to 0",
+			input: strings.Repeat("x", 90) + "\x1b[5H" + "hi", // max stays 90
+			want:  90,
+		},
+		{
+			name:  "HVP (ESC[f) sets column like CUP",
+			input: "\x1b[1;90fx", // col = 89 then 1 char = 90
+			want:  90,
+		},
+		// Claude-style UI: box-drawing chars separated by large CUF jumps.
+		// Mimics lines like: │<ESC>[52C<dim>│<ESC>[1C text <ESC>[NnC│
+		// which Claude uses to render its panel borders.
+		{
+			// │ (1 col) + ESC[52C + │ (1 col) + ESC[1C + text (6 cols) + ESC[34C + │ (1 col) = 96
+			name: "claude-style panel line with CUF border jumps",
+			input: "\x1b[38;2;215;119;87m" + // color
+				"\xe2\x94\x82" + // │ (col 1)
+				"\x1b[52C" + // jump to col 53
+				"\x1b[2m\xe2\x94\x82\x1b[1C" + // │ col 54, fwd 1 = col 55
+				"\x1b[22mhello!" + // 6 chars = col 61
+				"\x1b[34C" + // jump fwd 34 = col 95
+				"\xe2\x94\x82" + // │ col 96
+				"\x1b[39m",
+			want: 96,
+		},
+		{
+			// Mimics word-spaced lines: word ESC[1C word ESC[1C ... pushing past 80
+			// "Recent" ESC[1C "activity" ESC[1C ... ESC[35C │
+			name: "claude-style words with ESC[1C spacing",
+			input: "\xe2\x94\x82" + // │ col 1
+				"\x1b[22C" + // fwd 22 = col 23
+				"\x1b[1mRecent\x1b[1C" + // "Recent"=6 fwd 1 = col 30
+				"activity" + // 8 = col 38
+				"\x1b[35C" + // fwd 35 = col 73
+				"\xe2\x94\x82\x1b[39m", // │ = col 74
+			want: 80, // 74 < 80, falls back to 80
+		},
 	}
 
 	for _, tc := range tests {

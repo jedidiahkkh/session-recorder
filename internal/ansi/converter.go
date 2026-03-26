@@ -16,6 +16,7 @@ func Convert(r io.Reader, w io.Writer) error {
 		return err
 	}
 
+	data = preprocessClears(data)
 	cols := estimateCols(data)
 	encoded := base64.StdEncoding.EncodeToString(data)
 
@@ -24,6 +25,148 @@ func Convert(r io.Reader, w io.Writer) error {
 		"Rows":    50,
 		"RawB64":  encoded,
 	})
+}
+
+// countClears returns the number of full-screen erase sequences (\e[2J and \e[3J)
+// in data.
+func countClears(data []byte) int {
+	n := 0
+	i := 0
+	for i < len(data) {
+		if data[i] != 0x1b {
+			i++
+			continue
+		}
+		i++
+		if i >= len(data) || data[i] != '[' {
+			i++
+			continue
+		}
+		i++ // consume '['
+		start := i
+		for i < len(data) && (data[i] < 0x40 || data[i] > 0x7e) {
+			i++
+		}
+		if i >= len(data) {
+			break
+		}
+		if data[i] == 'J' {
+			param := string(data[start:i])
+			if param == "2" || param == "3" {
+				n++
+			} else if p := parseParam(param); p == 2 || p == 3 {
+				n++
+			}
+		}
+		i++ // consume final byte
+	}
+	return n
+}
+
+// parseParam parses a CSI numeric parameter string, returning -1 on error.
+func parseParam(s string) int {
+	if s == "" {
+		return 0
+	}
+	v := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		v = v*10 + int(c-'0')
+	}
+	return v
+}
+
+// preprocessClears replaces full-screen erase sequences (\e[2J and \e[3J) with
+// a visible "--- screen cleared (N of M) ---" marker so the viewer can scroll
+// through the full session history. Cursor-home sequences that immediately follow
+// a clear are stripped to prevent xterm.js from overwriting the marker.
+func preprocessClears(data []byte) []byte {
+	total := countClears(data)
+	if total == 0 {
+		return data
+	}
+
+	out := make([]byte, 0, len(data))
+	clearNum := 0
+	justCleared := false
+	i := 0
+
+	for i < len(data) {
+		b := data[i]
+
+		if b != 0x1b {
+			// Non-ESC: if we just emitted a marker, any printable byte
+			// (not \r or \n) cancels the justCleared flag.
+			if b != '\r' && b != '\n' {
+				justCleared = false
+			}
+			out = append(out, b)
+			i++
+			continue
+		}
+
+		// ESC byte
+		if i+1 >= len(data) {
+			out = append(out, b)
+			i++
+			continue
+		}
+
+		next := data[i+1]
+
+		if next != '[' {
+			// Two-byte or other sequence — copy as-is.
+			out = append(out, data[i:i+2]...)
+			justCleared = false
+			i += 2
+			continue
+		}
+
+		// CSI: collect param bytes and final byte.
+		paramStart := i + 2
+		j := paramStart
+		for j < len(data) && (data[j] < 0x40 || data[j] > 0x7e) {
+			j++
+		}
+		if j >= len(data) {
+			// Truncated — copy as-is.
+			out = append(out, data[i:]...)
+			break
+		}
+		final := data[j]
+		param := string(data[paramStart:j])
+		seqEnd := j + 1
+
+		switch {
+		case final == 'J' && (param == "2" || param == "3" || parseParam(param) == 2 || parseParam(param) == 3):
+			// Full-screen erase — replace with marker.
+			clearNum++
+			marker := fmt.Sprintf("\r\n\x1b[2m--- screen cleared (%d of %d) ---\x1b[0m\r\n", clearNum, total)
+			out = append(out, []byte(marker)...)
+			justCleared = true
+			i = seqEnd
+
+		case justCleared && final == 'H' && (param == "" || param == "1;1"):
+			// Cursor-home immediately after a clear — strip it.
+			i = seqEnd
+
+		case justCleared && final == 'f' && (param == "" || param == "1;1"):
+			// HVP cursor-home immediately after a clear — strip it.
+			i = seqEnd
+
+		default:
+			// All other CSI sequences — copy as-is.
+			out = append(out, data[i:seqEnd]...)
+			if final != 'H' && final != 'f' {
+				justCleared = false
+			}
+			i = seqEnd
+		}
+	}
+
+	return out
 }
 
 // estimateCols strips ANSI escape sequences and returns the length of the
@@ -125,5 +268,3 @@ var htmlTmpl = template.Must(template.New("html").Parse(strings.TrimSpace(`
 </html>
 `)))
 
-// Ensure fmt is used (it's available for future use).
-var _ = fmt.Sprintf

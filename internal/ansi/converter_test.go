@@ -1,6 +1,7 @@
 package ansi
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -170,6 +171,134 @@ func TestConvert(t *testing.T) {
 			t.Error("expected xterm.js reference in output")
 		}
 	})
+}
+
+func TestCountClears(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"no escapes", "hello world", 0},
+		{"one 2J", "before\x1b[2Jafter", 1},
+		{"one 3J", "before\x1b[3Jafter", 1},
+		{"mixed 2J and 3J", "\x1b[2Jmiddle\x1b[3J", 2},
+		{"partial erase 0J not counted", "text\x1b[Jmore", 0},
+		{"partial erase 1J not counted", "text\x1b[1Jmore", 0},
+		{"leading zero param counted", "text\x1b[02Jafter", 1},
+		{"color sequences not counted", "\x1b[1;32mhello\x1b[0m", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := countClears([]byte(tc.input))
+			if got != tc.want {
+				t.Errorf("countClears(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPreprocessClears(t *testing.T) {
+	clear2J := "\x1b[2J"
+	clear3J := "\x1b[3J"
+	cursorHome := "\x1b[H"
+	cursorHome11 := "\x1b[1;1H"
+
+	tests := []struct {
+		name        string
+		input       string
+		mustContain []string
+		mustAbsent  []string
+	}{
+		{
+			name:        "no clears — passthrough",
+			input:       "hello\nworld",
+			mustContain: []string{"hello", "world"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+		{
+			name:        "2J replaced with marker",
+			input:       "before" + clear2J + "after",
+			mustContain: []string{"before", "screen cleared", "1 of 1", "after"},
+			mustAbsent:  []string{clear2J},
+		},
+		{
+			name:        "3J replaced with marker",
+			input:       "before" + clear3J + "after",
+			mustContain: []string{"before", "screen cleared", "1 of 1", "after"},
+			mustAbsent:  []string{clear3J},
+		},
+		{
+			name:        "partial erase 0J left intact",
+			input:       "text\x1b[Jmore",
+			mustContain: []string{"\x1b[J"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+		{
+			name:        "partial erase 1J left intact",
+			input:       "text\x1b[1Jmore",
+			mustContain: []string{"\x1b[1J"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+		{
+			name:        "cursor-home after clear is stripped",
+			input:       "text" + clear2J + cursorHome + "after",
+			mustContain: []string{"screen cleared", "after"},
+			mustAbsent:  []string{clear2J, cursorHome},
+		},
+		{
+			name:        "cursor-home 1;1H after clear is stripped",
+			input:       "text" + clear2J + cursorHome11 + "after",
+			mustContain: []string{"screen cleared", "after"},
+			mustAbsent:  []string{clear2J, cursorHome11},
+		},
+		{
+			name:        "cursor-home not stripped if not after clear",
+			input:       cursorHome + "text",
+			mustContain: []string{cursorHome, "text"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+		{
+			name:        "consecutive clears have correct counters",
+			input:       clear2J + clear2J,
+			mustContain: []string{"1 of 2", "2 of 2"},
+			mustAbsent:  []string{clear2J},
+		},
+		{
+			name:        "clear at start of input",
+			input:       clear2J + "content",
+			mustContain: []string{"screen cleared", "1 of 1", "content"},
+			mustAbsent:  []string{clear2J},
+		},
+		{
+			name:        "leading zero param treated as full clear",
+			input:       "text\x1b[02Jafter",
+			mustContain: []string{"screen cleared", "1 of 1", "after"},
+			mustAbsent:  []string{"\x1b[02J"},
+		},
+		{
+			name:        "other CSI sequences unchanged",
+			input:       "\x1b[1;32mhello\x1b[0m",
+			mustContain: []string{"\x1b[1;32m", "hello", "\x1b[0m"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := preprocessClears([]byte(tc.input))
+			for _, want := range tc.mustContain {
+				if !bytes.Contains(got, []byte(want)) {
+					t.Errorf("output missing %q\nfull output: %q", want, got)
+				}
+			}
+			for _, absent := range tc.mustAbsent {
+				if bytes.Contains(got, []byte(absent)) {
+					t.Errorf("output should not contain %q\nfull output: %q", absent, got)
+				}
+			}
+		})
+	}
 }
 
 // Ensure Convert satisfies the io.Reader / io.Writer interface expectations

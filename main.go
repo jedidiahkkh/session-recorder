@@ -50,7 +50,7 @@ func main() {
 	}
 	defer htmlFile.Close()
 
-	if err := ansi.Convert(ansiFile, htmlFile); err != nil {
+	if err := ansi.ConvertSnapshots(ansiFile, htmlFile); err != nil {
 		fmt.Fprintf(os.Stderr, "error: could not convert session to HTML: %v\n", err)
 		os.Exit(1)
 	}

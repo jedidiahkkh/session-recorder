@@ -176,10 +176,10 @@ func TestEstimateCols(t *testing.T) {
 	}
 }
 
-func TestConvert(t *testing.T) {
+func TestConvertJoined(t *testing.T) {
 	t.Run("empty input produces valid HTML with cols 80", func(t *testing.T) {
 		var out strings.Builder
-		if err := Convert(strings.NewReader(""), &out); err != nil {
+		if err := ConvertJoined(strings.NewReader(""), &out); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		html := out.String()
@@ -199,7 +199,7 @@ func TestConvert(t *testing.T) {
 	t.Run("input bytes are base64-encoded into output", func(t *testing.T) {
 		input := "hello world\n"
 		var out strings.Builder
-		if err := Convert(strings.NewReader(input), &out); err != nil {
+		if err := ConvertJoined(strings.NewReader(input), &out); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := base64.StdEncoding.EncodeToString([]byte(input))
@@ -211,7 +211,7 @@ func TestConvert(t *testing.T) {
 	t.Run("cols reflects longest line in input", func(t *testing.T) {
 		input := strings.Repeat("x", 120) + "\n"
 		var out strings.Builder
-		if err := Convert(strings.NewReader(input), &out); err != nil {
+		if err := ConvertJoined(strings.NewReader(input), &out); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !strings.Contains(out.String(), "cols: 120") {
@@ -222,7 +222,7 @@ func TestConvert(t *testing.T) {
 	t.Run("reader error is propagated", func(t *testing.T) {
 		sentinel := errors.New("read failed")
 		var out strings.Builder
-		err := Convert(errReader{sentinel}, &out)
+		err := ConvertJoined(errReader{sentinel}, &out)
 		if err == nil {
 			t.Fatal("expected an error, got nil")
 		}
@@ -233,7 +233,7 @@ func TestConvert(t *testing.T) {
 
 	t.Run("output contains xterm.js script tag", func(t *testing.T) {
 		var out strings.Builder
-		if err := Convert(strings.NewReader("test"), &out); err != nil {
+		if err := ConvertJoined(strings.NewReader("test"), &out); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !strings.Contains(out.String(), "xterm") {
@@ -242,33 +242,260 @@ func TestConvert(t *testing.T) {
 	})
 }
 
-func TestCountClears(t *testing.T) {
+func TestSplitFrames(t *testing.T) {
+	clear2J := "\x1b[2J"
+	clear3J := "\x1b[3J"
+	cursorHome := "\x1b[H"
+
 	tests := []struct {
-		name  string
-		input string
-		want  int
+		name       string
+		input      string
+		wantFrames []string
 	}{
-		{"no escapes", "hello world", 0},
-		{"one 2J", "before\x1b[2Jafter", 1},
-		{"one 3J", "before\x1b[3Jafter", 1},
-		{"mixed 2J and 3J separated by text", "\x1b[2Jmiddle\x1b[3J", 2},
-		{"2J+3J consecutive counts as 1", "\x1b[2J\x1b[3J", 1},
-		{"3J+2J consecutive counts as 1", "\x1b[3J\x1b[2J", 1},
-		{"three consecutive clears count as 1", "\x1b[2J\x1b[3J\x1b[2J", 1},
-		{"two runs separated by text count as 2", "\x1b[2J\x1b[3J" + "x" + "\x1b[2J\x1b[3J", 2},
-		{"cursor-home included in group", "\x1b[2J\x1b[3J\x1b[H", 1},
-		{"partial erase 0J not counted", "text\x1b[Jmore", 0},
-		{"partial erase 1J not counted", "text\x1b[1Jmore", 0},
-		{"color sequences not counted", "\x1b[1;32mhello\x1b[0m", 0},
+		{
+			name:       "no clears → single frame with all data",
+			input:      "hello world",
+			wantFrames: []string{"hello world"},
+		},
+		{
+			name:       "empty input → single empty frame",
+			input:      "",
+			wantFrames: []string{""},
+		},
+		{
+			name:       "one 2J clear → two frames",
+			input:      "before" + clear2J + "after",
+			wantFrames: []string{"before", "after"},
+		},
+		{
+			name:       "one 3J clear → two frames",
+			input:      "before" + clear3J + "after",
+			wantFrames: []string{"before", "after"},
+		},
+		{
+			name:       "clear at start → first frame empty",
+			input:      clear2J + "content",
+			wantFrames: []string{"", "content"},
+		},
+		{
+			name:       "clear at end → last frame empty",
+			input:      "content" + clear2J,
+			wantFrames: []string{"content", ""},
+		},
+		{
+			name:       "two separate clears → three frames",
+			input:      "a" + clear2J + "b" + clear3J + "c",
+			wantFrames: []string{"a", "b", "c"},
+		},
+		{
+			name:       "consecutive clears treated as one group → two frames",
+			input:      "before" + clear2J + clear3J + "after",
+			wantFrames: []string{"before", "after"},
+		},
+		{
+			name:       "cursor-home after clear is consumed with clear group",
+			input:      "before" + clear2J + cursorHome + "after",
+			wantFrames: []string{"before", "after"},
+		},
+		{
+			name:       "standalone cursor-home not treated as clear",
+			input:      "before" + cursorHome + "after",
+			wantFrames: []string{"before" + cursorHome + "after"},
+		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := countClears([]byte(tc.input))
-			if got != tc.want {
-				t.Errorf("countClears(%q) = %d, want %d", tc.input, got, tc.want)
+			got := SplitFrames([]byte(tc.input))
+			if len(got) != len(tc.wantFrames) {
+				t.Fatalf("SplitFrames(%q): got %d frames, want %d\nframes: %q", tc.input, len(got), len(tc.wantFrames), got)
+			}
+			for i, frame := range got {
+				if string(frame) != tc.wantFrames[i] {
+					t.Errorf("frame[%d]: got %q, want %q", i, frame, tc.wantFrames[i])
+				}
 			}
 		})
 	}
+}
+
+func TestJoinFrames(t *testing.T) {
+	tests := []struct {
+		name        string
+		frames      [][]byte
+		mustContain []string
+		mustAbsent  []string
+	}{
+		{
+			name:        "single frame → no separator",
+			frames:      [][]byte{[]byte("hello")},
+			mustContain: []string{"hello"},
+			mustAbsent:  []string{"screen cleared"},
+		},
+		{
+			name:        "two frames → one separator (1 of 1)",
+			frames:      [][]byte{[]byte("first"), []byte("second")},
+			mustContain: []string{"first", "second", "screen cleared", "1 of 1"},
+		},
+		{
+			name:        "three frames → two separators",
+			frames:      [][]byte{[]byte("a"), []byte("b"), []byte("c")},
+			mustContain: []string{"a", "b", "c", "1 of 2", "2 of 2"},
+		},
+		{
+			name:        "empty first frame → separator still inserted",
+			frames:      [][]byte{[]byte(""), []byte("after")},
+			mustContain: []string{"screen cleared", "1 of 1", "after"},
+		},
+		{
+			name:        "all empty frames → just separators",
+			frames:      [][]byte{[]byte(""), []byte(""), []byte("")},
+			mustContain: []string{"1 of 2", "2 of 2"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := joinFrames(tc.frames)
+			for _, want := range tc.mustContain {
+				if !bytes.Contains(got, []byte(want)) {
+					t.Errorf("output missing %q\nfull output: %q", want, got)
+				}
+			}
+			for _, absent := range tc.mustAbsent {
+				if bytes.Contains(got, []byte(absent)) {
+					t.Errorf("output should not contain %q\nfull output: %q", absent, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertSnapshots(t *testing.T) {
+	clear2J := "\x1b[2J"
+
+	t.Run("no clears → single frame in JS array", func(t *testing.T) {
+		input := "hello world"
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		if !strings.Contains(html, "<!DOCTYPE html>") {
+			t.Error("output missing <!DOCTYPE html>")
+		}
+		// One frame: the array should contain exactly one base64 entry.
+		want := base64.StdEncoding.EncodeToString([]byte(input))
+		if !strings.Contains(html, "'"+want+"'") {
+			t.Errorf("expected base64 %q in output", want)
+		}
+		// Only one entry means no comma between two entries (no ',',' pattern).
+		if strings.Contains(html, want+"','") {
+			t.Error("unexpected second frame entry in single-frame output")
+		}
+	})
+
+	t.Run("one clear → two frames in JS array", func(t *testing.T) {
+		input := "first" + clear2J + "second"
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		b64first := base64.StdEncoding.EncodeToString([]byte("first"))
+		b64second := base64.StdEncoding.EncodeToString([]byte("second"))
+		if !strings.Contains(html, "'"+b64first+"'") {
+			t.Errorf("expected first frame base64 %q in output", b64first)
+		}
+		if !strings.Contains(html, "'"+b64second+"'") {
+			t.Errorf("expected second frame base64 %q in output", b64second)
+		}
+	})
+
+	t.Run("clear at start filters leading empty frame", func(t *testing.T) {
+		input := clear2J + "content"
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		// Only "content" frame; empty first frame should be stripped.
+		b64content := base64.StdEncoding.EncodeToString([]byte("content"))
+		b64empty := base64.StdEncoding.EncodeToString([]byte(""))
+		if !strings.Contains(html, "'"+b64content+"'") {
+			t.Errorf("expected content frame in output")
+		}
+		if strings.Contains(html, "'"+b64empty+"'") {
+			t.Error("empty leading frame should have been filtered out")
+		}
+	})
+
+	t.Run("clear at end filters trailing empty frame", func(t *testing.T) {
+		input := "content" + clear2J
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader(input), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		b64content := base64.StdEncoding.EncodeToString([]byte("content"))
+		b64empty := base64.StdEncoding.EncodeToString([]byte(""))
+		if !strings.Contains(html, "'"+b64content+"'") {
+			t.Errorf("expected content frame in output")
+		}
+		if strings.Contains(html, "'"+b64empty+"'") {
+			t.Error("empty trailing frame should have been filtered out")
+		}
+	})
+
+	t.Run("output contains arrow key navigation JS", func(t *testing.T) {
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader("test"), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		if !strings.Contains(html, "ArrowLeft") {
+			t.Error("expected ArrowLeft navigation in output")
+		}
+		if !strings.Contains(html, "ArrowRight") {
+			t.Error("expected ArrowRight navigation in output")
+		}
+	})
+
+	t.Run("output contains prev and next buttons", func(t *testing.T) {
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader("test"), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		html := out.String()
+		if !strings.Contains(html, "Prev") {
+			t.Error("expected Prev button in output")
+		}
+		if !strings.Contains(html, "Next") {
+			t.Error("expected Next button in output")
+		}
+	})
+
+	t.Run("output contains xterm.js reference", func(t *testing.T) {
+		var out strings.Builder
+		if err := ConvertSnapshots(strings.NewReader("test"), &out); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(out.String(), "xterm") {
+			t.Error("expected xterm.js reference in output")
+		}
+	})
+
+	t.Run("reader error is propagated", func(t *testing.T) {
+		sentinel := errors.New("read failed")
+		var out strings.Builder
+		err := ConvertSnapshots(errReader{sentinel}, &out)
+		if err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+		if !errors.Is(err, sentinel) {
+			t.Errorf("expected sentinel error, got %v", err)
+		}
+	})
 }
 
 func TestPreprocessClears(t *testing.T) {
@@ -397,10 +624,10 @@ func TestPreprocessClears(t *testing.T) {
 	}
 }
 
-// Ensure Convert satisfies the io.Reader / io.Writer interface expectations
-// at compile time — this is a compile-only check, not a runtime test.
+// Compile-time checks that ConvertJoined and ConvertSnapshots satisfy io.Reader/io.Writer.
 var _ = func() {
 	var r io.Reader
 	var w io.Writer
-	_ = Convert(r, w)
+	_ = ConvertJoined(r, w)
+	_ = ConvertSnapshots(r, w)
 }

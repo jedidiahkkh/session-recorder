@@ -1,14 +1,49 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"record-session/internal/ansi"
 	"regexp"
 )
 
+type ConvertMode string
+
+const (
+	ModeJoined    ConvertMode = "joined"
+	ModeSnapshots ConvertMode = "snapshots"
+)
+
+func (m *ConvertMode) String() string { return string(*m) }
+
+func (m *ConvertMode) Set(s string) error {
+	switch ConvertMode(s) {
+	case ModeJoined, ModeSnapshots:
+		*m = ConvertMode(s)
+		return nil
+	default:
+		return fmt.Errorf("must be 'joined' or 'snapshots'")
+	}
+}
+
 func main() {
-	input := os.Args[1]
+	var mode ConvertMode
+	flag.Var(&mode, "mode", "output mode: joined or snapshots")
+	flag.Parse()
+
+	if mode == "" {
+		fmt.Fprintln(os.Stderr, "error: -mode is required (joined or snapshots)")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	args := flag.Args()
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: converter -mode=joined|snapshots <file.ansi>")
+		os.Exit(1)
+	}
+	input := args[0]
 
 	in, err := os.Open(input)
 	if err != nil {
@@ -32,8 +67,15 @@ func main() {
 	}
 	defer out.Close()
 
-	if err := ansi.Convert(in, out); err != nil {
-		fmt.Fprintln(os.Stderr, "error: could not convert input file: ", input, ": ", err)
+	var convertErr error
+	switch mode {
+	case ModeJoined:
+		convertErr = ansi.ConvertJoined(in, out)
+	case ModeSnapshots:
+		convertErr = ansi.ConvertSnapshots(in, out)
+	}
+	if convertErr != nil {
+		fmt.Fprintln(os.Stderr, "error: could not convert input file: ", input, ": ", convertErr)
 		os.Exit(1)
 	}
 

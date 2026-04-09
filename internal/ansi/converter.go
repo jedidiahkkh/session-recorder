@@ -15,17 +15,65 @@ var clearGroupRe = regexp.MustCompile(
 	`(?:\x1b\[(?:2|3)J)+(?:\x1b\[(?:H|1;1H|f|1;1f))?`,
 )
 
-// Convert reads raw terminal bytes from r, estimates the terminal width,
+// SplitFrames splits raw ANSI data into frames on screen-clear boundaries.
+// Clear sequences are consumed and not included in any frame.
+// Returns at least one frame (may be empty if input is empty or starts/ends with a clear).
+func SplitFrames(data []byte) [][]byte {
+	indices := clearGroupRe.FindAllIndex(data, -1)
+	if len(indices) == 0 {
+		return [][]byte{data}
+	}
+	frames := make([][]byte, 0, len(indices)+1)
+	prev := 0
+	for _, idx := range indices {
+		frames = append(frames, data[prev:idx[0]])
+		prev = idx[1]
+	}
+	return append(frames, data[prev:])
+}
+
+// joinFrames concatenates frames with a visible "--- screen cleared (N of M) ---"
+// ANSI marker inserted between each pair.
+func joinFrames(frames [][]byte) []byte {
+	if len(frames) == 0 {
+		return nil
+	}
+	total := len(frames) - 1
+	var out []byte
+	for i, frame := range frames {
+		out = append(out, frame...)
+		if i < total {
+			out = append(out, []byte(fmt.Sprintf(
+				"\r\n\x1b[2m--- screen cleared (%d of %d) ---\x1b[0m\r\n", i+1, total,
+			))...)
+		}
+	}
+	return out
+}
+
+// preprocessClears replaces each logical screen-clear group with a visible
+// "--- screen cleared (N of M) ---" marker so the viewer can scroll through
+// the full session history.
+func preprocessClears(data []byte) []byte {
+	frames := SplitFrames(data)
+	if len(frames) <= 1 {
+		return data
+	}
+	return joinFrames(frames)
+}
+
+// ConvertJoined reads raw terminal bytes from r, estimates the terminal width,
 // and writes a self-contained HTML document using xterm.js to w.
-func Convert(r io.Reader, w io.Writer) error {
+// Frames between screen-clears are joined with visible "screen cleared" markers.
+func ConvertJoined(r io.Reader, w io.Writer) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
 
-	data = preprocessClears(data)
-	cols := estimateCols(data)
-	encoded := base64.StdEncoding.EncodeToString(data)
+	joined := joinFrames(SplitFrames(data))
+	cols := estimateCols(joined)
+	encoded := base64.StdEncoding.EncodeToString(joined)
 
 	return htmlTmpl.Execute(w, map[string]any{
 		"Cols":   cols,
@@ -34,28 +82,54 @@ func Convert(r io.Reader, w io.Writer) error {
 	})
 }
 
-// countClears returns the number of logical screen-clear groups in data.
-// A group is one or more consecutive ESC[2J/ESC[3J sequences plus an optional
-// trailing cursor-home, all treated as a single clear event.
-func countClears(data []byte) int {
-	return len(clearGroupRe.FindAllIndex(data, -1))
-}
-
-// preprocessClears replaces each logical screen-clear group with a visible
-// "--- screen cleared (N of M) ---" marker so the viewer can scroll through
-// the full session history. A group is one or more consecutive ESC[2J/ESC[3J
-// sequences plus an optional trailing cursor-home, all consumed as one event.
-func preprocessClears(data []byte) []byte {
-	total := countClears(data)
-	if total == 0 {
-		return data
+// ConvertSnapshots reads raw terminal bytes from r and writes an interactive
+// HTML document where the user can navigate between frames using buttons or
+// arrow keys. Empty leading/trailing frames are filtered out.
+func ConvertSnapshots(r io.Reader, w io.Writer) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
 	}
 
-	n := 0
-	return clearGroupRe.ReplaceAllFunc(data, func(_ []byte) []byte {
-		n++
-		return []byte(fmt.Sprintf("\r\n\x1b[2m--- screen cleared (%d of %d) ---\x1b[0m\r\n", n, total))
+	frames := SplitFrames(data)
+
+	// Filter leading empty frames.
+	for len(frames) > 0 && len(frames[0]) == 0 {
+		frames = frames[1:]
+	}
+	// Filter trailing empty frames.
+	for len(frames) > 0 && len(frames[len(frames)-1]) == 0 {
+		frames = frames[:len(frames)-1]
+	}
+	// Ensure at least one frame.
+	if len(frames) == 0 {
+		frames = [][]byte{{}}
+	}
+
+	// Estimate cols across all frames combined.
+	var all []byte
+	for _, f := range frames {
+		all = append(all, f...)
+	}
+	cols := estimateCols(all)
+
+	// Base64 encode each frame individually.
+	encoded := make([]string, len(frames))
+	for i, f := range frames {
+		encoded[i] = base64.StdEncoding.EncodeToString(f)
+	}
+
+	return htmlSnapshotsTmpl.Execute(w, snapshotsTemplateData{
+		Cols:   cols,
+		Rows:   50,
+		Frames: encoded,
 	})
+}
+
+type snapshotsTemplateData struct {
+	Cols   int
+	Rows   int
+	Frames []string
 }
 
 // estimateCols tracks cursor column position through both printable characters
@@ -215,6 +289,78 @@ var htmlTmpl = template.Must(template.New("html").Parse(strings.TrimSpace(`
   const buf = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
   term.write(buf);
+</script>
+</body>
+</html>
+`)))
+
+var htmlSnapshotsTmpl = template.Must(template.New("snapshots").Parse(strings.TrimSpace(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session recording</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"/>
+<style>
+  html, body { margin: 0; padding: 16px; background: #1e1e1e; font-family: sans-serif; }
+  #controls { color: #ccc; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+  button { background: #333; color: #fff; border: 1px solid #555; padding: 4px 10px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+  button:hover:not(:disabled) { background: #444; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #counter { font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button id="prev" onclick="navigate(-1)">&#9664; Prev</button>
+  <span id="counter"></span>
+  <button id="next" onclick="navigate(1)">Next &#9654;</button>
+</div>
+<div id="t"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script>
+  const frames = [{{range .Frames}}'{{.}}',{{end}}];
+  let current = 0;
+  let term = new Terminal({
+    cols: {{.Cols}},
+    rows: {{.Rows}},
+    scrollback: 9999999,
+    convertEol: false,
+    theme: { background: '#1e1e1e' }
+  });
+  term.open(document.getElementById('t'));
+
+  function loadFrame(idx) {
+    term.dispose();
+    term = new Terminal({
+      cols: {{.Cols}},
+      rows: {{.Rows}},
+      scrollback: 100000,
+      convertEol: false,
+      theme: { background: '#1e1e1e' }
+    });
+    term.open(document.getElementById('t'));
+    const raw = atob(frames[idx]);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    term.write(buf);
+    document.getElementById('counter').textContent = 'Snapshot ' + (idx + 1) + ' of ' + frames.length;
+    document.getElementById('prev').disabled = idx === 0;
+    document.getElementById('next').disabled = idx === frames.length - 1;
+  }
+
+  function navigate(delta) {
+    current = Math.max(0, Math.min(frames.length - 1, current + delta));
+    loadFrame(current);
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft') navigate(-1);
+    if (e.key === 'ArrowRight') navigate(1);
+  });
+
+  loadFrame(0);
 </script>
 </body>
 </html>

@@ -28,9 +28,9 @@ func Convert(r io.Reader, w io.Writer) error {
 	encoded := base64.StdEncoding.EncodeToString(data)
 
 	return htmlTmpl.Execute(w, map[string]any{
-		"Cols":    cols,
-		"Rows":    50,
-		"RawB64":  encoded,
+		"Cols":   cols,
+		"Rows":   50,
+		"RawB64": encoded,
 	})
 }
 
@@ -205,7 +205,7 @@ var htmlTmpl = template.Must(template.New("html").Parse(strings.TrimSpace(`
   const term = new Terminal({
     cols: {{.Cols}},
     rows: {{.Rows}},
-    scrollback: 50000,
+    scrollback: 9999999,
     convertEol: false,
     theme: { background: '#1e1e1e' }
   });
@@ -219,4 +219,3 @@ var htmlTmpl = template.Must(template.New("html").Parse(strings.TrimSpace(`
 </body>
 </html>
 `)))
-
